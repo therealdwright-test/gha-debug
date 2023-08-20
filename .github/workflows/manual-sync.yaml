@@ -1,0 +1,80 @@
+name: Manual Sync Reminder
+
+# run on pull request push and review submission or all status checks pass as these are the criteria
+# that determine whether or not a PR is mergable. We only want to comment once the PR is ready to merge
+# to avoid spamming PR's.
+on:
+  pull_request:
+    branches: [ '**' ]
+  pull_request_review:
+    types:
+      - submitted
+  workflow_call:
+
+jobs:
+  check-for-manual-sync-dirs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Get changed directories
+        id: changed-dirs
+        uses: tj-actions/changed-files@54849deb963ca9f24185fb5de2965e002d066e6b #v37.0.5
+        with:
+          dir_names: "true"
+
+      - name: Check for changes in manual dirs
+        id: check-manual-dirs
+        shell: bash
+        run: |
+          manual_dirs=(
+            "foo"
+          )
+          echo "Directories that have changed:"
+          changed_dirs="${{ steps.changed-dirs.outputs.all_modified_files }}"
+          echo "$changed_dirs"
+          changed_manual_dirs=""
+          for dir in "${manual_dirs[@]}"; do
+            if [[ "$changed_dirs" == *"$dir"* ]]; then
+              changed_manual_dirs="$changed_manual_dirs $dir"
+            fi
+          done
+          echo "changed_manual_dirs=$changed_manual_dirs" >> $GITHUB_ENV
+
+      - name: Get PR details
+        id: get-pr-details
+        shell: bash
+        run: |
+          end_time=$((SECONDS+45))
+          while [[ $SECONDS -lt $end_time ]]; do
+              pr_details=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                  "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}")
+              mergeable_state=$(echo "$pr_details" | jq -r .mergeable_state)
+              echo "$(printf "%s : %s\n" "$(date -u)" "$(date -u +%s)")"
+              echo "Checking mergeability state: $mergeable_state"
+              if [[ "$mergeable_state" != "blocked" ]]; then
+                  echo "Mergeable state is no longer 'blocked'. Logging the state and exiting loop..."
+                  echo "mergeable=$(echo $pr_details | jq .mergeable)" >> $GITHUB_OUTPUT
+                  echo "mergeable_state=$mergeable_state" >> $GITHUB_OUTPUT
+                  exit 0
+              else
+                  echo "Mergeable state is still 'blocked'. Waiting 5 seconds before checking again..."
+              fi
+              sleep 5
+          done
+          echo "45 seconds elapsed. Logging the final mergeable state..."
+          echo "mergeable=$(echo $pr_details | jq .mergeable)" >> $GITHUB_OUTPUT
+          echo "mergeable_state=$mergeable_state" >> $GITHUB_OUTPUT
+
+      - name: Comment on PR if manual sync is required
+        if: env.changed_manual_dirs && steps.get-pr-details.outputs.mergeable == 'true' && steps.get-pr-details.outputs.mergeable_state != 'blocked'
+        shell: bash
+        run: |
+          comment="⚠️ Manual sync in ArgoCD is required because the following directory(s) changed: ${{ env.changed_manual_dirs }}."
+          curl \
+            -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": \"$comment\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
