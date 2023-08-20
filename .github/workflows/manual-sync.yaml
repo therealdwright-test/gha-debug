@@ -11,6 +11,8 @@ on:
       - submitted
   workflow_call:
 
+permissions: write-all
+
 jobs:
   check-for-manual-sync-dirs:
     runs-on: ubuntu-latest
